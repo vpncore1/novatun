@@ -148,15 +148,18 @@ func handleClient(rawConn net.Conn, psk []byte, mode string, fbHandler *camoufla
 	// 3. Start multiplexed TunnelSession
 	sess, err := transport.NewServerSession(sConn, nil)
 	if err != nil {
+		log.Printf("[WARN] Failed to create server session from %s: %v", rawConn.RemoteAddr(), err)
 		_ = sConn.Close()
 		return
 	}
 	defer sess.Close()
+	log.Printf("[INFO] Established client session from %s", rawConn.RemoteAddr())
 
 	// 4. Accept logical streams
 	for {
 		stream, err := sess.AcceptStream()
 		if err != nil {
+			log.Printf("[INFO] Session from %s ended: %v", rawConn.RemoteAddr(), err)
 			break
 		}
 		go handleStream(stream)
@@ -185,12 +188,14 @@ func handleStream(stream net.Conn) {
 func handleTCPStream(stream net.Conn) {
 	target, err := proxy.ReadTarget(stream)
 	if err != nil {
+		log.Printf("[WARN] Failed to read stream target: %v", err)
 		return
 	}
 
 	dialer := net.Dialer{Timeout: 10 * time.Second}
 	targetConn, err := dialer.Dial("tcp", target)
 	if err != nil {
+		log.Printf("[WARN] Failed to dial local target %s: %v", target, err)
 		return
 	}
 	defer targetConn.Close()

@@ -513,11 +513,13 @@ func main() {
 							defer c.Close()
 							_, stream, err := openStreamWithRetry(ctx, tunnelMgr, proxy.StreamTypeTCP)
 							if err != nil {
+								log.Printf("[WARN] Failed to open logical stream to %s: %v", target, err)
 								return
 							}
 							defer stream.Close()
 
 							if err := proxy.WriteTarget(stream, target); err != nil {
+								log.Printf("[WARN] Failed to write target %s to stream: %v", target, err)
 								return
 							}
 							_ = proxy.Relay(c, stream)
