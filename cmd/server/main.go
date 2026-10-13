@@ -95,8 +95,8 @@ func main() {
 	}()
 
 	var fbHandler *camouflage.FallbackHandler
-	if *mode == "ws" {
-		fbHandler = camouflage.NewFallbackHandler(*wsPath, *fallbackAddr)
+	if cfg.Mode == "ws" {
+		fbHandler = camouflage.NewFallbackHandler(cfg.Path, cfg.FallbackAddr)
 	}
 
 	for {
@@ -112,7 +112,7 @@ func main() {
 			}
 		}
 
-		go handleClient(conn, psk, *mode, fbHandler, *fallbackAddr)
+		go handleClient(conn, psk, cfg.Mode, fbHandler, cfg.FallbackAddr)
 	}
 }
 
