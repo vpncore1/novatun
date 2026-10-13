@@ -57,8 +57,7 @@ type TunnelSession struct {
 // NewClientSession or NewServerSession.
 func DefaultConfig() *yamux.Config {
 	cfg := yamux.DefaultConfig()
-	cfg.EnableKeepAlive = true
-	cfg.KeepAliveInterval = defaultKeepAliveInterval
+	cfg.EnableKeepAlive = false
 	cfg.MaxStreamWindowSize = defaultMaxStreamWindow
 	cfg.ConnectionWriteTimeout = defaultConnectionWriteTimeout
 	// Discard logs by default to keep stderr clean in production
