@@ -232,6 +232,7 @@ func main() {
 	wsPath := flag.String("path", "", "WebSocket camouflage URL path (e.g. /api/v1/stream)")
 	enableTUN := flag.Bool("tun", false, "Enable full-tunnel OS virtual TUN VPN mode")
 	tunName := flag.String("tun-name", "", "Virtual TUN adapter name")
+	forwardPorts := flag.String("forward-ports", "", "Comma-separated list/ranges of ports to listen and forward to Kharej (e.g. '443,80,2053,8443')")
 	flag.Parse()
 
 	// Load base config from file if provided, otherwise defaults
@@ -258,6 +259,9 @@ func main() {
 	}
 	if *socksAddr != "" {
 		cfg.Socks = *socksAddr
+	}
+	if *forwardPorts != "" {
+		cfg.ForwardPorts = *forwardPorts
 	}
 	// Check if -tun flag was explicitly provided on CLI
 	flag.Visit(func(f *flag.Flag) {
@@ -336,7 +340,7 @@ func main() {
 		log.Printf("[INFO] TUN packet forwarding engine started")
 	}
 
-	// 2. SOCKS5 Inbound Server (runs concurrently or standalone)
+	// 2. SOCKS5 Inbound Server (runs concurrently if configured)
 	if cfg.Socks != "" {
 		socksServer := &proxy.Server{
 			TCPHandler: func(ctx context.Context, clientConn net.Conn, target string) error {
@@ -458,24 +462,157 @@ func main() {
 		defer listener.Close()
 		log.Printf("[INFO] novatun SOCKS5 client running on %s -> tunnel %s (Mode: %s)", cfg.Socks, cfg.Server, cfg.Mode)
 
-
 		go func() {
 			<-ctx.Done()
 			log.Printf("[INFO] Shutting down SOCKS5 listener...")
 			_ = listener.Close()
 		}()
 
-		if err := socksServer.Serve(listener); err != nil {
-			select {
-			case <-ctx.Done():
-				log.Printf("[INFO] Client stopped gracefully")
-			default:
-				log.Printf("[FATAL] SOCKS5 server terminated: %v", err)
+		go func() {
+			if err := socksServer.Serve(listener); err != nil {
+				select {
+				case <-ctx.Done():
+				default:
+					log.Printf("[WARN] SOCKS5 server terminated: %v", err)
+				}
+			}
+		}()
+	}
+
+	// 3. Transparent Multi-Port Forwarding Relay (for direct x-ui / Sanaei bridge)
+	if cfg.ForwardPorts != "" {
+		ports, err := config.ParsePortList(cfg.ForwardPorts)
+		if err != nil {
+			log.Fatalf("[FATAL] Invalid forward_ports configuration: %v", err)
+		}
+
+		for _, port := range ports {
+			p := port
+			targetAddr := fmt.Sprintf("127.0.0.1:%d", p)
+
+			// Start TCP Port Listener
+			tcpListenAddr := fmt.Sprintf("0.0.0.0:%d", p)
+			tcpLn, err := net.Listen("tcp", tcpListenAddr)
+			if err != nil {
+				log.Printf("[WARN] Failed to bind TCP forward port %d: %v", p, err)
+			} else {
+				log.Printf("[INFO] Forwarding TCP port %d -> remote Kharej %s", p, targetAddr)
+				go func(ln net.Listener, target string) {
+					go func() {
+						<-ctx.Done()
+						_ = ln.Close()
+					}()
+
+					for {
+						inConn, err := ln.Accept()
+						if err != nil {
+							return
+						}
+
+						go func(c net.Conn) {
+							defer c.Close()
+							_, stream, err := openStreamWithRetry(ctx, tunnelMgr, proxy.StreamTypeTCP)
+							if err != nil {
+								return
+							}
+							defer stream.Close()
+
+							if err := proxy.WriteTarget(stream, target); err != nil {
+								return
+							}
+							_ = proxy.Relay(c, stream)
+						}(inConn)
+					}
+				}(tcpLn, targetAddr)
+			}
+
+			// Start UDP Port Listener
+			udpListenAddr := fmt.Sprintf("0.0.0.0:%d", p)
+			udpLAddr, err := net.ResolveUDPAddr("udp", udpListenAddr)
+			if err == nil {
+				udpConn, err := net.ListenUDP("udp", udpLAddr)
+				if err != nil {
+					log.Printf("[WARN] Failed to bind UDP forward port %d: %v", p, err)
+				} else {
+					log.Printf("[INFO] Forwarding UDP port %d -> remote Kharej %s", p, targetAddr)
+					go func(u *net.UDPConn, target string) {
+						go func() {
+							<-ctx.Done()
+							_ = u.Close()
+						}()
+
+						// Map client remote addr to tunnel UDP stream
+						var streamMu sync.Mutex
+						var udpStream net.Conn
+						clientAddrMap := make(map[string]time.Time)
+						var clientMapMu sync.RWMutex
+
+						ensureUDPStream := func() (net.Conn, error) {
+							streamMu.Lock()
+							defer streamMu.Unlock()
+							if udpStream != nil {
+								return udpStream, nil
+							}
+							_, s, err := openStreamWithRetry(ctx, tunnelMgr, proxy.StreamTypeUDP)
+							if err != nil {
+								return nil, err
+							}
+							udpStream = s
+
+							// Reader from Kharej UDP stream back to clients
+							go func(st net.Conn) {
+								defer func() {
+									streamMu.Lock()
+									if udpStream == st {
+										udpStream = nil
+									}
+									streamMu.Unlock()
+									_ = st.Close()
+								}()
+
+								for {
+									_, payload, err := proxy.ReadUDPPacket(st)
+									if err != nil {
+										return
+									}
+									// Broadcast response to active clients on this port
+									clientMapMu.RLock()
+									for cAddrStr := range clientAddrMap {
+										if rAddr, err := net.ResolveUDPAddr("udp", cAddrStr); err == nil {
+											_, _ = u.WriteToUDP(payload, rAddr)
+										}
+									}
+									clientMapMu.RUnlock()
+								}
+							}(s)
+
+							return udpStream, nil
+						}
+
+						buf := make([]byte, 65535)
+						for {
+							n, cAddr, err := u.ReadFromUDP(buf)
+							if err != nil {
+								return
+							}
+
+							clientMapMu.Lock()
+							clientAddrMap[cAddr.String()] = time.Now()
+							clientMapMu.Unlock()
+
+							st, err := ensureUDPStream()
+							if err != nil {
+								continue
+							}
+
+							_ = proxy.WriteUDPPacket(st, target, buf[:n])
+						}
+					}(udpConn, targetAddr)
+				}
 			}
 		}
-	} else {
-		// TUN only mode - wait for signal
-		<-ctx.Done()
-		log.Printf("[INFO] Client stopped gracefully")
 	}
+
+	<-ctx.Done()
+	log.Printf("[INFO] Client stopped gracefully")
 }

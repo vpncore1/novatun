@@ -26,10 +26,11 @@ type ClientConfig struct {
 	Mode     string `json:"mode"`
 	Host     string `json:"host"`
 	Path     string `json:"path"`
-	Socks    string `json:"socks"`
-	TUN      bool   `json:"tun"`
-	TUNName  string `json:"tun_name"`
-	LogLevel string `json:"log_level"`
+	Socks        string `json:"socks"`
+	ForwardPorts string `json:"forward_ports"`
+	TUN          bool   `json:"tun"`
+	TUNName      string `json:"tun_name"`
+	LogLevel     string `json:"log_level"`
 }
 
 // DefaultServerConfig returns production defaults for the server.
@@ -117,8 +118,99 @@ func (c *ClientConfig) Validate() error {
 	if c.Mode != "raw" && c.Mode != "ws" {
 		c.Mode = "raw"
 	}
-	if c.Socks == "" && !c.TUN {
-		return errors.New("client config: at least one inbound service must be enabled (socks or tun)")
+	if c.Socks == "" && !c.TUN && c.ForwardPorts == "" {
+		return errors.New("client config: at least one inbound service must be enabled (socks, tun, or forward_ports)")
 	}
 	return nil
+}
+
+// ParsePortList parses a comma-separated list of ports or ranges (e.g. "443,80,2053,8000-8005") into a slice of integers.
+func ParsePortList(input string) ([]int, error) {
+	if input == "" {
+		return nil, nil
+	}
+	portSet := make(map[int]struct{})
+	parts := splitClean(input, ",")
+	for _, part := range parts {
+		if part == "" {
+			continue
+		}
+		if containsRange(part) {
+			rangeParts := splitClean(part, "-")
+			if len(rangeParts) != 2 {
+				return nil, fmt.Errorf("invalid port range %q", part)
+			}
+			start, err := parsePort(rangeParts[0])
+			if err != nil {
+				return nil, fmt.Errorf("invalid start port in %q: %w", part, err)
+			}
+			end, err := parsePort(rangeParts[1])
+			if err != nil {
+				return nil, fmt.Errorf("invalid end port in %q: %w", part, err)
+			}
+			if start > end {
+				start, end = end, start
+			}
+			for p := start; p <= end; p++ {
+				portSet[p] = struct{}{}
+			}
+		} else {
+			p, err := parsePort(part)
+			if err != nil {
+				return nil, fmt.Errorf("invalid port %q: %w", part, err)
+			}
+			portSet[p] = struct{}{}
+		}
+	}
+
+	ports := make([]int, 0, len(portSet))
+	for p := range portSet {
+		ports = append(ports, p)
+	}
+	return ports, nil
+}
+
+func parsePort(s string) (int, error) {
+	var p int
+	_, err := fmt.Sscanf(s, "%d", &p)
+	if err != nil || p < 1 || p > 65535 {
+		return 0, fmt.Errorf("port must be between 1 and 65535, got %q", s)
+	}
+	return p, nil
+}
+
+func splitClean(s, sep string) []string {
+	var res []string
+	start := 0
+	for i := 0; i <= len(s); i++ {
+		if i == len(s) || (len(sep) == 1 && s[i] == sep[0]) {
+			part := trimSpace(s[start:i])
+			if part != "" {
+				res = append(res, part)
+			}
+			start = i + 1
+		}
+	}
+	return res
+}
+
+func containsRange(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] == '-' {
+			return true
+		}
+	}
+	return false
+}
+
+func trimSpace(s string) string {
+	start := 0
+	for start < len(s) && (s[start] == ' ' || s[start] == '\t' || s[start] == '\r' || s[start] == '\n') {
+		start++
+	}
+	end := len(s)
+	for end > start && (s[end-1] == ' ' || s[end-1] == '\t' || s[end-1] == '\r' || s[end-1] == '\n') {
+		end--
+	}
+	return s[start:end]
 }

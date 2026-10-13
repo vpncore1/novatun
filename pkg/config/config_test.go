@@ -100,6 +100,42 @@ func TestConfigValidationErrors(t *testing.T) {
 	if err := cliCfg.Validate(); err == nil {
 		t.Fatal("expected error on missing server address")
 	}
+
+	cliCfg.Server = "1.2.3.4:443"
+	// No socks, tun, or forward_ports
+	if err := cliCfg.Validate(); err == nil {
+		t.Fatal("expected error when no inbound service is specified")
+	}
+
+	// Valid with ForwardPorts
+	cliCfg.ForwardPorts = "443,80,2053,8000-8005"
+	if err := cliCfg.Validate(); err != nil {
+		t.Fatalf("expected valid with ForwardPorts, got: %v", err)
+	}
+}
+
+func TestParsePortList(t *testing.T) {
+	ports, err := ParsePortList("443, 80, 2053, 8000-8003")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	expected := map[int]bool{443: true, 80: true, 2053: true, 8000: true, 8001: true, 8002: true, 8003: true}
+	if len(ports) != len(expected) {
+		t.Fatalf("expected %d ports, got %d (%v)", len(expected), len(ports), ports)
+	}
+	for _, p := range ports {
+		if !expected[p] {
+			t.Fatalf("unexpected port %d in result", p)
+		}
+	}
+
+	// Invalid ports
+	if _, err := ParsePortList("invalid"); err == nil {
+		t.Fatal("expected error on invalid port")
+	}
+	if _, err := ParsePortList("70000"); err == nil {
+		t.Fatal("expected error on port > 65535")
+	}
 }
 
 func fmtHex(b []byte) string {

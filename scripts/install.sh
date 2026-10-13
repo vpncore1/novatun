@@ -152,8 +152,10 @@ install_kharej() {
     ensure_deps
     install_binaries
 
-    local default_port="443"
-    read -rp "Enter listen port [Default: ${default_port}]: " listen_port
+    local default_port="9443"
+    echo -e "${YELLOW}Note:${NC} Use a dedicated Stealth Port for the encrypted tunnel (e.g. 9443)."
+    echo -e "Your Sanaei (x-ui) panel inbounds can use 443, 80, 2053, 8443, etc. without any conflict."
+    read -rp "Enter Stealth Tunnel Listen Port [Default: ${default_port}]: " listen_port
     listen_port="${listen_port:-$default_port}"
 
     local default_psk
@@ -223,13 +225,16 @@ EOF
     echo -e "Status:  ${CYAN}systemctl status novatun-kharej${NC}"
     echo -e "Logs:    ${CYAN}journalctl -u novatun-kharej -f${NC}"
     echo ""
-    echo -e "${YELLOW}>>> COPY THE FOLLOWING INFO FOR SERVER IRAN: <<<${NC}"
+    echo -e "${GREEN}>>> ONE-LINE COMMAND TO RUN ON SERVER IRAN: <<<${NC}"
     echo -e "----------------------------------------------------"
+    echo -e "${BOLD}bash <(curl -fsSL https://raw.githubusercontent.com/${GITHUB_REPO}/main/scripts/install.sh) iran ${pub_ip} ${listen_port} ${psk} ${path}${NC}"
+    echo -e "----------------------------------------------------"
+    echo ""
+    echo -e "${YELLOW}Manual Parameters (if needed):${NC}"
     echo -e "Kharej IP:   ${BOLD}${pub_ip}${NC}"
     echo -e "Port:        ${BOLD}${listen_port}${NC}"
     echo -e "PSK:         ${BOLD}${psk}${NC}"
     echo -e "Path:        ${BOLD}${path}${NC}"
-    echo -e "----------------------------------------------------"
     echo ""
 }
 
@@ -243,38 +248,56 @@ install_iran() {
     ensure_deps
     install_binaries
 
-    read -rp "Enter Remote Kharej Server IP: " kharej_ip
-    while [[ -z "${kharej_ip}" ]]; do
-        error "Kharej Server IP cannot be empty!"
+    # Enable IPv4 forwarding
+    sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 || true
+    echo "net.ipv4.ip_forward=1" > /etc/sysctl.d/99-novatun.conf 2>/dev/null || true
+
+    local kharej_ip="${1:-}"
+    local kharej_port="${2:-}"
+    local psk="${3:-}"
+    local path="${4:-}"
+    local forward_ports="${5:-}"
+
+    if [[ -z "${kharej_ip}" ]]; then
         read -rp "Enter Remote Kharej Server IP: " kharej_ip
-    done
-
-    read -rp "Enter Remote Kharej Server Port [Default: 443]: " kharej_port
-    kharej_port="${kharej_port:-443}"
-
-    read -rp "Enter 32-byte Hex PSK (from Kharej): " psk
-    while [[ -z "${psk}" ]]; do
-        error "PSK cannot be empty!"
-        read -rp "Enter 32-byte Hex PSK: " psk
-    done
-
-    read -rp "Enter WebSocket Camouflage Path (from Kharej, e.g. /api/v1/stream-xxxx): " path
-    while [[ -z "${path}" ]]; do
-        error "Path cannot be empty!"
-        read -rp "Enter WebSocket Camouflage Path: " path
-    done
-
-    read -rp "Enter SNI / Host Header [Default: ${kharej_ip}]: " host
-    host="${host:-$kharej_ip}"
-
-    read -rp "Enter Inbound SOCKS5 Listen Address [Default: 0.0.0.0:1080]: " socks
-    socks="${socks:-0.0.0.0:1080}"
-
-    read -rp "Enable System-Wide TUN VPN Mode? (y/N) [Default: n]: " enable_tun
-    local tun_bool=false
-    if [[ "${enable_tun}" =~ ^[Yy]$ ]]; then
-        tun_bool=true
+        while [[ -z "${kharej_ip}" ]]; do
+            error "Kharej Server IP cannot be empty!"
+            read -rp "Enter Remote Kharej Server IP: " kharej_ip
+        done
     fi
+
+    if [[ -z "${kharej_port}" ]]; then
+        read -rp "Enter Remote Kharej Stealth Port [Default: 9443]: " kharej_port
+        kharej_port="${kharej_port:-9443}"
+    fi
+
+    if [[ -z "${psk}" ]]; then
+        read -rp "Enter 32-byte Hex PSK (from Kharej): " psk
+        while [[ -z "${psk}" ]]; do
+            error "PSK cannot be empty!"
+            read -rp "Enter 32-byte Hex PSK: " psk
+        done
+    fi
+
+    if [[ -z "${path}" ]]; then
+        read -rp "Enter WebSocket Camouflage Path (from Kharej, e.g. /api/v1/stream-xxxx): " path
+        while [[ -z "${path}" ]]; do
+            error "Path cannot be empty!"
+            read -rp "Enter WebSocket Camouflage Path: " path
+        done
+    fi
+
+    local default_fwd="443,80,2053,2083,2087,2096,8443"
+    if [[ -z "${forward_ports}" ]]; then
+        echo -e "${YELLOW}Sanaei Multi-Port Bridge:${NC} Ports on Iran that directly mirror to Kharej local inbounds."
+        read -rp "Enter ports to forward (TCP+UDP) [Default: ${default_fwd}]: " input_fwd
+        forward_ports="${input_fwd:-$default_fwd}"
+    fi
+
+    local default_host="${kharej_ip}"
+    local host="${default_host}"
+    local socks="127.0.0.1:1080"
+    local tun_bool=false
 
     cat <<EOF > "${IRAN_CONFIG}"
 {
@@ -284,6 +307,7 @@ install_iran() {
   "host": "${host}",
   "path": "${path}",
   "socks": "${socks}",
+  "forward_ports": "${forward_ports}",
   "tun": ${tun_bool},
   "tun_name": "novatun0",
   "log_level": "info"
@@ -326,9 +350,12 @@ EOF
     echo -e "${GREEN}====================================================${NC}"
     echo -e "${BOLD}       Iran Relay Installed and Started!            ${NC}"
     echo -e "${GREEN}====================================================${NC}"
-    echo -e "Status:    ${CYAN}systemctl status novatun-iran${NC}"
-    echo -e "Logs:      ${CYAN}journalctl -u novatun-iran -f${NC}"
-    echo -e "Inbound:   ${BOLD}SOCKS5 running on ${pub_ip}:${socks}${NC}"
+    echo -e "Status:           ${CYAN}systemctl status novatun-iran${NC}"
+    echo -e "Logs:             ${CYAN}journalctl -u novatun-iran -f${NC}"
+    echo -e "Forwarded Ports:  ${BOLD}${forward_ports}${NC} (TCP & UDP)"
+    echo -e "SOCKS5 Proxy:     ${BOLD}127.0.0.1:1080${NC}"
+    echo ""
+    echo -e "${CYAN}Everything is ready! In your client apps (v2rayNG/V2rayN), set Address to ${BOLD}${pub_ip}${NC}${CYAN} on any of the forwarded ports.${NC}"
     echo ""
 }
 
@@ -428,12 +455,14 @@ show_menu() {
 main() {
     check_root
     if [[ $# -gt 0 ]]; then
-        case "$1" in
-            kharej) install_kharej ;;
-            iran) install_iran ;;
+        local action="$1"
+        shift
+        case "${action}" in
+            kharej) install_kharej "$@" ;;
+            iran) install_iran "$@" ;;
             status) show_config ;;
             uninstall) uninstall_novatun ;;
-            *) error "Unknown parameter: $1. Usage: $0 [kharej|iran|status|uninstall]" ;;
+            *) error "Unknown parameter: ${action}. Usage: $0 [kharej|iran|status|uninstall]" ;;
         esac
     else
         show_menu
