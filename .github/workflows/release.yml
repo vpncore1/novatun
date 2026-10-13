@@ -1,0 +1,70 @@
+name: Release Novatun Binaries
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build & Release Binaries
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+            ext: ""
+            archive_ext: tar.gz
+          - goos: linux
+            goarch: arm64
+            ext: ""
+            archive_ext: tar.gz
+          - goos: windows
+            goarch: amd64
+            ext: ".exe"
+            archive_ext: zip
+
+    steps:
+      - name: Checkout Source Code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+          check-latest: true
+
+      - name: Build Server and Client
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: 0
+        run: |
+          TAG_NAME=${GITHUB_REF#refs/tags/}
+          OUTPUT_DIR="novatun-${TAG_NAME}-${{ matrix.goos }}-${{ matrix.goarch }}"
+          mkdir -p "${OUTPUT_DIR}"
+
+          go build -trimpath -ldflags="-s -w -X main.version=${TAG_NAME}" -o "${OUTPUT_DIR}/novatun-server${{ matrix.ext }}" ./cmd/server
+          go build -trimpath -ldflags="-s -w -X main.version=${TAG_NAME}" -o "${OUTPUT_DIR}/novatun-client${{ matrix.ext }}" ./cmd/client
+
+          # Copy scripts & sample configs
+          cp -r scripts "${OUTPUT_DIR}/" || true
+
+          if [ "${{ matrix.archive_ext }}" = "tar.gz" ]; then
+            tar -czvf "${OUTPUT_DIR}.tar.gz" -C "${OUTPUT_DIR}" .
+          else
+            zip -r "${OUTPUT_DIR}.zip" "${OUTPUT_DIR}"
+          fi
+
+      - name: Upload Release Asset
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            novatun-*-*.tar.gz
+            novatun-*-*.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -1,0 +1,25 @@
+# Binaries and executables
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+novatun-server
+novatun-client
+
+# Test binaries
+*.test
+
+# Output and build archives
+novatun-*.tar.gz
+novatun-*.zip
+
+# Configurations with secrets
+*.json
+!example_*.json
+
+# OS and IDE files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
